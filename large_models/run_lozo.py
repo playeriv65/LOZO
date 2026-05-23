@@ -64,6 +64,8 @@ class OurArguments(TrainingArguments):
     zo_eps: float = 1e-3 # eps in LOZO
     step_interval: int = 50 # $\nu$ in LOZO
     rank_r: int = 2 # rank r in LOZO
+    lozo_random_device: str = "cuda" # cpu or cuda; controls where LOZO U/V/z random tensors are sampled
+    lozo_train_scope: str = "lora_only" # lora_only skips embeddings/1D; full includes embeddings and 1D params
 
     # Prefix tuning
     prefix_tuning: bool = False # whether to use prefix tuning

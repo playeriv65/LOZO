@@ -695,27 +695,69 @@ class LowRankTrainer(Trainer):
 
     # =========================================== LOZO Functions ==============================================================
 
+    def _lozo_should_skip_param(self, name, param):
+        train_scope = getattr(self.args, "lozo_train_scope", "lora_only")
+        if train_scope == "full":
+            return False
+        if train_scope != "lora_only":
+            raise ValueError(f"unknown lozo_train_scope: {train_scope}")
+        if "embed" in name:
+            return True
+        return param.data.ndim == 1
+
+    def _lozo_random_device_for(self, target_device):
+        random_device = getattr(self.args, "lozo_random_device", "cpu")
+        if random_device == "cpu":
+            return torch.device("cpu")
+        if random_device == "cuda":
+            if target_device.type != "cuda":
+                raise ValueError("lozo_random_device='cuda' requires CUDA model parameters")
+            return target_device
+        raise ValueError(f"unknown lozo_random_device: {random_device}")
+
+    def _lozo_seed_rng(self, random_seed):
+        torch.manual_seed(random_seed)
+        if getattr(self.args, "lozo_random_device", "cpu") == "cuda" and torch.cuda.is_available():
+            torch.cuda.manual_seed_all(random_seed)
+
+    def _lozo_randn(self, shape, target_device, dtype):
+        return torch.randn(
+            shape,
+            device=self._lozo_random_device_for(target_device),
+            dtype=dtype,
+        ).to(target_device)
+
 
     def lowrank_zo_perturb_parameters(self, random_seed=None, scaling_factor=1):
         """
         Perturb the parameters with random vector uv^t.
+        
+        Default scope skips embeddings and 1D params to align with vLLM
+        LoRA-compatible implementation. Use lozo_train_scope=full for ablation.
         """
         args = self.args
         step = self.step
 
-        torch.manual_seed(random_seed if random_seed is not None else self.zo_random_seed)
+        self._lozo_seed_rng(random_seed if random_seed is not None else self.zo_random_seed)
         
         for name, param in self.named_parameters_to_optim:
+            if self._lozo_should_skip_param(name, param):
+                continue
+            
             if param.data.ndim >= 2:
                 if step % args.step_interval == 0:
-                    v = torch.randn(param.data.size(1), args.rank_r, device=param.data.device, dtype=param.data.dtype)
+                    v = self._lozo_randn(
+                        (param.data.size(1), args.rank_r),
+                        param.data.device,
+                        param.data.dtype,
+                    )
                     self.v[name] = v
                 else:
                     v = self.v[name]
                 u = self.random_gaussian_matrix(m=param.data.size(0), n=args.rank_r, device=param.data.device, dtype=param.data.dtype)
                 param.data = param.data + scaling_factor * (u@v.t()) * self.args.zo_eps
             else:
-                z = torch.normal(mean=0, std=1, size=param.data.size(), device=param.data.device, dtype=param.data.dtype)
+                z = self._lozo_randn(tuple(param.data.size()), param.data.device, param.data.dtype)
                 param.data = param.data + scaling_factor * z * self.args.zo_eps
 
     def zo_forward(self, model, inputs):
@@ -801,9 +843,12 @@ class LowRankTrainer(Trainer):
         args = self.args
 
         # Reset the random seed for sampling 
-        torch.manual_seed(self.zo_random_seed)     
+        self._lozo_seed_rng(self.zo_random_seed)
 
         for name, param in self.named_parameters_to_optim:
+            if self._lozo_should_skip_param(name, param):
+                continue
+            
             if param.data.ndim >= 2:
                 v = self.v[name]
                 u = self.random_gaussian_matrix(m=param.data.size(0), n=args.rank_r, device=param.data.device, dtype=param.data.dtype)
@@ -813,20 +858,19 @@ class LowRankTrainer(Trainer):
                 else:
                     param.data = param.data - self._get_learning_rate() * (self.projected_grad * (u@v.t()))
             else:
-                # Resample z for bias
-                z = torch.normal(mean=0, std=1, size=param.data.size(), device=param.data.device, dtype=param.data.dtype)
+                z = self._lozo_randn(tuple(param.data.size()), param.data.device, param.data.dtype)
                 if "bias" not in name and "layer_norm" not in name and "layernorm" not in name:
                     param.data = param.data - self._get_learning_rate() * (self.projected_grad * z + args.weight_decay * param.data)
                 else:
-                    param.data = param.data - self._get_learning_rate() * (self.projected_grad * z)
+                    param.data = param.data - self._get_learning_rate() * self.projected_grad * z
 
         self.lr_scheduler.step()
         
     def random_gaussian_matrix(self, m, n, device, dtype, random_seed=None):
         if random_seed is not None:
-            torch.manual_seed(random_seed)
+            self._lozo_seed_rng(random_seed)
 
-        random_matrix = torch.randn(m, n, device=device, dtype=dtype)
+        random_matrix = self._lozo_randn((m, n), device, dtype)
         return random_matrix
 
     ############## Misc overload functions ##############

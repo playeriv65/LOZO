@@ -1,6 +1,6 @@
 #!/bin/bash
 # -*- coding: utf-8 -*-
-export CUDA_VISIBLE_DEVICES=0
+# Set CUDA_VISIBLE_DEVICES externally if a specific GPU allocation is needed.
 export WANDB_DISABLED=true
 export TQDM_DISABLE=1
 
