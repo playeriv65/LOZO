@@ -5,9 +5,11 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 import argparse
+import os
 import time
 import tasks
 from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM, Trainer, HfArgumentParser, Trainer, TrainingArguments, DataCollatorWithPadding, DataCollatorForTokenClassification
+from transformers.trainer_callback import TrainerCallback
 from typing import Union, Optional
 import torch
 from torch.nn.parameter import Parameter
@@ -109,6 +111,11 @@ class OurArguments(TrainingArguments):
     # Auto saving when interrupted
     save_on_interrupt: bool = False # save model when interrupted (useful for long training)
 
+    # Phase-4 logging extension
+    eval_at_start: bool = False # run one eval before training starts
+    eval_accuracy_during_training: bool = False # compute task accuracy at each HF eval step
+    eval_metrics_file: str = None # optional jsonl file for step/loss/accuracy metrics
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -123,6 +130,37 @@ def set_seed(seed: int):
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+
+def append_eval_metrics(args, metrics):
+    if args.eval_metrics_file is None:
+        return
+    os.makedirs(os.path.dirname(args.eval_metrics_file), exist_ok=True)
+    with open(args.eval_metrics_file, "a") as f:
+        f.write(json.dumps(metrics) + "\n")
+        f.flush()
+
+
+class EvalAccuracyCallback(TrainerCallback):
+    def __init__(self, framework, eval_samples):
+        self.framework = framework
+        self.eval_samples = eval_samples
+
+    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
+        metrics = metrics or {}
+        row = {"step": int(state.global_step)}
+        if "eval_loss" in metrics:
+            row["loss"] = float(metrics["eval_loss"])
+        if getattr(args, "eval_accuracy_during_training", False):
+            acc_metrics = self.framework.evaluate([], self.eval_samples, verbose_examples=0)
+            metric_name = getattr(self.framework.task, "metric_name", "accuracy")
+            if metric_name in acc_metrics:
+                row["accuracy"] = float(acc_metrics[metric_name])
+            for name, value in acc_metrics.items():
+                row[name] = float(value)
+        logger.info(f"phase_eval_metrics={row}")
+        append_eval_metrics(args, row)
+        return control
 
 
 class Framework:
@@ -317,7 +355,7 @@ class Framework:
             return Prediction(correct_candidate=correct_candidate_id, predicted_candidate=int(np.argmax(scores)))
 
 
-    def evaluate(self, train_samples, eval_samples, one_train_set_per_eval_sample=False):
+    def evaluate(self, train_samples, eval_samples, one_train_set_per_eval_sample=False, verbose_examples=3):
         """
         Evaluate function. If one_train_set_per_eval_sample is True, then each eval sample has its own training (demonstration) set.
         """
@@ -330,7 +368,11 @@ class Framework:
         predictions = []  
         for eval_id, eval_sample in enumerate(tqdm(eval_samples)):
             predictions.append(
-                self.one_step_pred(train_samples[eval_id] if one_train_set_per_eval_sample else train_samples, eval_sample, verbose=(eval_id < 3))
+                self.one_step_pred(
+                    train_samples[eval_id] if one_train_set_per_eval_sample else train_samples,
+                    eval_sample,
+                    verbose=(eval_id < verbose_examples),
+                )
             )
 
         # Calculate metrics 
@@ -418,6 +460,8 @@ class Framework:
                 tokenizer=self.tokenizer,
                 data_collator=DataCollatorWithPaddingAndNesting(self.tokenizer, pad_to_multiple_of=8) if self.args.train_as_classification else collator(self.tokenizer, pad_to_multiple_of=8),
             )
+        if self.args.eval_at_start or self.args.eval_accuracy_during_training:
+            trainer.add_callback(EvalAccuracyCallback(self, eval_samples))
         if self.args.save_on_interrupt:
             trainer.add_callback(SIGUSR1Callback())
 
@@ -433,6 +477,9 @@ class Framework:
             )
         if self.args.resume_from_checkpoint is not None:
             last_checkpoint = self.args.resume_from_checkpoint
+
+        if self.args.eval_at_start:
+            trainer.evaluate(eval_dataset=eval_dataset)
 
         trainer.train(resume_from_checkpoint=last_checkpoint) 
 
