@@ -1,3 +1,5 @@
 __pycache__/
 *.pyc
 large_models/.venv/
+large_models/result/
+large_models/wandb/
