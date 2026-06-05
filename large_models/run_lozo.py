@@ -54,6 +54,7 @@ class OurArguments(TrainingArguments):
 
     # Training
     trainer: str = "none" 
+    past_index: int = -1
     ## options
     ## - none: no training -- for zero-shot or in-context learning (ICL)
     ## - regular: regular huggingface trainer -- for fine-tuning
@@ -202,13 +203,17 @@ class Framework:
                     torch_dtype = torch.float16
                 elif self.args.load_bfloat16:
                     torch_dtype = torch.bfloat16
+                model_kwargs = {
+                    "config": config,
+                    "device_map": "auto",
+                    "torch_dtype": torch_dtype,
+                    "max_memory": {i: f"{free_in_GB-5}GB" for i in range(torch.cuda.device_count())},
+                }
+                if self.args.load_int8:
+                    model_kwargs["load_in_8bit"] = True
                 model = AutoModelForCausalLM.from_pretrained(
                     self.args.model_name if self.args.model_path is None else self.args.model_path,
-                    config=config,
-                    device_map='auto',
-                    torch_dtype=torch_dtype,
-                    max_memory={i: f'{free_in_GB-5}GB' for i in range(torch.cuda.device_count())},
-                    load_in_8bit=self.args.load_int8,
+                    **model_kwargs,
                 )
             model.eval()
 
@@ -468,7 +473,7 @@ class Framework:
         # Resume training from a last checkpoint
         last_checkpoint = None
         from transformers.trainer_utils import get_last_checkpoint
-        if os.path.isdir(self.args.output_dir) and not self.args.overwrite_output_dir:
+        if os.path.isdir(self.args.output_dir) and not getattr(self.args, "overwrite_output_dir", False):
             last_checkpoint = get_last_checkpoint(self.args.output_dir)
         if last_checkpoint is not None and self.args.resume_from_checkpoint is None:
             logger.info(
