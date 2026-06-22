@@ -61,6 +61,7 @@ class OurArguments(TrainingArguments):
 
     # MeZO
     zo_eps: float = 1e-3 # eps in MeZO
+    mezo_lora_only: bool = False # restrict MeZO perturb/update scope to non-embedding 2D parameters
 
     # Prefix tuning
     prefix_tuning: bool = False # whether to use prefix tuning

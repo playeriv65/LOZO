@@ -696,6 +696,14 @@ class OurTrainer(Trainer):
     ############## MeZO ##############
 
 
+    def _mezo_should_skip_param(self, name, param):
+        if not getattr(self.args, "mezo_lora_only", False):
+            return False
+        if "embed" in name:
+            return True
+        return param.data.ndim != 2
+
+
     def zo_perturb_parameters(self, random_seed=None, scaling_factor=1):
         """
         Perturb the parameters with random vector z.
@@ -763,7 +771,7 @@ class OurTrainer(Trainer):
         # What parameters to optimize 
         self.named_parameters_to_optim = []
         for name, param in model.named_parameters():
-            if param.requires_grad:
+            if param.requires_grad and not self._mezo_should_skip_param(name, param):
                 self.named_parameters_to_optim.append((name, param))
 
         # Sample the random seed for sampling z
