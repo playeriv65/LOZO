@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Un
 import copy
 from metrics import f1
 import numpy as np
+import json
 
 from tqdm.auto import tqdm
 from transformers import Trainer
@@ -213,6 +214,90 @@ SCALER_NAME = "scaler.pt"
 class LowRankTrainer(Trainer):
 
     from transformers.trainer_pt_utils import _get_learning_rate, log_metrics, metrics_format, save_metrics, save_state
+
+    def _lozo_timing_enabled(self):
+        return bool(getattr(self.args, "timing_file", None))
+
+    def _lozo_timing_sync(self):
+        if self._lozo_timing_enabled() and torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+    def _lozo_timing_init(self):
+        if hasattr(self, "_lozo_timing_state"):
+            return
+        self._lozo_timing_state = {
+            "step_count": 0,
+            "step_s": [],
+            "zo_step_s": [],
+            "update_s": [],
+            "other_s": [],
+            "history": [],
+            "measured_t0": None,
+            "measured_t1": None,
+            "current_step_t0": None,
+            "last_zo_step_s": 0.0,
+        }
+
+    def _lozo_timing_summary(self, values):
+        if not values:
+            return {"count": 0, "mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0}
+        arr = np.asarray(values, dtype=np.float64)
+        return {
+            "count": int(arr.size),
+            "mean": float(arr.mean()),
+            "std": float(arr.std()),
+            "min": float(arr.min()),
+            "max": float(arr.max()),
+        }
+
+    def _lozo_timing_tail_summary(self, values, tail_n=100):
+        return self._lozo_timing_summary(values[-tail_n:])
+
+    def write_lozo_timing_file(self):
+        timing_file = getattr(self.args, "timing_file", None)
+        if not timing_file or not hasattr(self, "_lozo_timing_state"):
+            return
+        state = self._lozo_timing_state
+        step_s = state["step_s"]
+        zo_step_s = state["zo_step_s"]
+        update_s = state["update_s"]
+        other_s = state["other_s"]
+        measured_t0 = state["measured_t0"]
+        measured_t1 = state["measured_t1"]
+        total_s = 0.0 if measured_t0 is None else float(measured_t1 - measured_t0)
+        payload = {
+            "timing_source": "lozo_internal_perf_counter",
+            "warmup_steps": int(getattr(self.args, "timing_warmup_steps", 0) or 0),
+            "total_s": total_s,
+            "step_s": self._lozo_timing_summary(step_s),
+            "zo_step_s": self._lozo_timing_summary(zo_step_s),
+            "update_s": self._lozo_timing_summary(update_s),
+            "step_s_mean": float(np.mean(step_s)) if step_s else 0.0,
+            "zo_step_s_mean": float(np.mean(zo_step_s)) if zo_step_s else 0.0,
+            "update_s_mean": float(np.mean(update_s)) if update_s else 0.0,
+            "tail_100": {
+                "step_s": self._lozo_timing_tail_summary(step_s, 100),
+                "zo_step_s": self._lozo_timing_tail_summary(zo_step_s, 100),
+                "update_s": self._lozo_timing_tail_summary(update_s, 100),
+                "other_s": self._lozo_timing_tail_summary(other_s, 100),
+            },
+            "aligned_phase_s": {
+                "probe_forward_s": self._lozo_timing_summary(zo_step_s),
+                "update_s": self._lozo_timing_summary(update_s),
+                "other_s": self._lozo_timing_summary(other_s),
+                "tail_100": {
+                    "probe_forward_s": self._lozo_timing_tail_summary(zo_step_s, 100),
+                    "update_s": self._lozo_timing_tail_summary(update_s, 100),
+                    "other_s": self._lozo_timing_tail_summary(other_s, 100),
+                },
+            },
+            "history": state["history"],
+        }
+        timing_dir = os.path.dirname(timing_file)
+        if timing_dir:
+            os.makedirs(timing_dir, exist_ok=True)
+        with open(timing_file, "w") as f:
+            json.dump(payload, f, indent=2)
 
     def _inner_training_loop(
         self, batch_size=None, args=None, resume_from_checkpoint=None, trial=None, ignore_keys_for_eval=None
@@ -807,6 +892,12 @@ class LowRankTrainer(Trainer):
         Estimate gradient by Lowrank-zo. Return the loss from f(theta + uv^t)
         """
         args = self.args
+        timing_enabled = self._lozo_timing_enabled()
+        if timing_enabled:
+            self._lozo_timing_init()
+            self._lozo_timing_sync()
+            step_t0 = time.perf_counter()
+            self._lozo_timing_state["current_step_t0"] = step_t0
         if hasattr(self, 'step'):
             self.step += 1
         else:
@@ -836,11 +927,21 @@ class LowRankTrainer(Trainer):
 
         # Reset model back to its parameters at start of step
         self.lowrank_zo_perturb_parameters(scaling_factor=1)
+        if timing_enabled:
+            self._lozo_timing_sync()
+            self._lozo_timing_state["last_zo_step_s"] = float(
+                time.perf_counter() - step_t0
+            )
         return loss1
 
 
     def lowrank_zo_update(self):
         args = self.args
+        timing_enabled = self._lozo_timing_enabled()
+        if timing_enabled:
+            self._lozo_timing_init()
+            self._lozo_timing_sync()
+            update_t0 = time.perf_counter()
 
         # Reset the random seed for sampling 
         self._lozo_seed_rng(self.zo_random_seed)
@@ -865,6 +966,44 @@ class LowRankTrainer(Trainer):
                     param.data = param.data - self._get_learning_rate() * self.projected_grad * z
 
         self.lr_scheduler.step()
+        if timing_enabled:
+            self._lozo_timing_sync()
+            update_s = float(time.perf_counter() - update_t0)
+            state = self._lozo_timing_state
+            state["step_count"] += 1
+            warmup_steps = int(getattr(self.args, "timing_warmup_steps", 0) or 0)
+            measured_step = state["step_count"] > warmup_steps
+            measured_index = state["step_count"] - warmup_steps
+            step_t0 = state.get("current_step_t0")
+            step_s = (
+                float(time.perf_counter() - step_t0)
+                if step_t0 is not None
+                else float(state["last_zo_step_s"] + update_s)
+            )
+            if measured_step:
+                if state["measured_t0"] is None:
+                    state["measured_t0"] = step_t0
+                state["measured_t1"] = time.perf_counter()
+                zo_step_s = float(state["last_zo_step_s"])
+                other_s = max(0.0, step_s - zo_step_s - update_s)
+                state["step_s"].append(step_s)
+                state["zo_step_s"].append(zo_step_s)
+                state["update_s"].append(update_s)
+                state["other_s"].append(other_s)
+                row = {
+                    "step": int(measured_index),
+                    "raw_step": int(state["step_count"]),
+                    "step_s": step_s,
+                    "zo_step_s": zo_step_s,
+                    "update_s": update_s,
+                    "other_s": other_s,
+                }
+                state["history"].append(row)
+                progress_interval = int(
+                    getattr(self.args, "timing_progress_interval", 0) or 0
+                )
+                if progress_interval > 0 and measured_index % progress_interval == 0:
+                    logger.info(f"lozo_timing={row}")
         
     def random_gaussian_matrix(self, m, n, device, dtype, random_seed=None):
         if random_seed is not None:

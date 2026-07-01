@@ -116,6 +116,9 @@ class OurArguments(TrainingArguments):
     eval_at_start: bool = False # run one eval before training starts
     eval_accuracy_during_training: bool = False # compute task accuracy at each HF eval step
     eval_metrics_file: str = None # optional jsonl file for step/loss/accuracy metrics
+    timing_file: str = None # optional JSON file for LOZO internal timing metrics
+    timing_warmup_steps: int = 0 # number of initial LOZO steps excluded from timing
+    timing_progress_interval: int = 0 # log timing every N measured steps; 0 disables
 
 
 def parse_args():
@@ -486,7 +489,9 @@ class Framework:
         if self.args.eval_at_start:
             trainer.evaluate(eval_dataset=eval_dataset)
 
-        trainer.train(resume_from_checkpoint=last_checkpoint) 
+        trainer.train(resume_from_checkpoint=last_checkpoint)
+        if hasattr(trainer, "write_lozo_timing_file"):
+            trainer.write_lozo_timing_file()
 
         # Explicitly save the model
         if self.args.save_model:
