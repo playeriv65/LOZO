@@ -37,7 +37,11 @@ import numpy as np
 
 from tqdm.auto import tqdm
 from transformers import Trainer
-from sklearn.linear_model import LinearRegression, LogisticRegression, LogisticRegressionCV
+from sklearn.linear_model import (
+    LinearRegression,
+    LogisticRegression,
+    LogisticRegressionCV,
+)
 
 # Integrations must be imported before ML frameworks:
 from transformers.integrations import (  # isort: split
@@ -67,15 +71,30 @@ from huggingface_hub import Repository
 
 from transformers import __version__
 from transformers.configuration_utils import PretrainedConfig
-from transformers.data.data_collator import DataCollator, DataCollatorWithPadding, default_data_collator
+from transformers.data.data_collator import (
+    DataCollator,
+    DataCollatorWithPadding,
+    default_data_collator,
+)
 from transformers.debug_utils import DebugOption, DebugUnderflowOverflow
 from transformers.deepspeed import deepspeed_init, is_deepspeed_zero3_enabled
 from transformers.dependency_versions_check import dep_version_check
 from transformers.modelcard import TrainingSummary
-from transformers.modeling_utils import PreTrainedModel, load_sharded_checkpoint, unwrap_model
-from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES, MODEL_MAPPING_NAMES
+from transformers.modeling_utils import (
+    PreTrainedModel,
+    load_sharded_checkpoint,
+    unwrap_model,
+)
+from transformers.models.auto.modeling_auto import (
+    MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
+    MODEL_MAPPING_NAMES,
+)
 from transformers.optimization import Adafactor, get_scheduler
-from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS, is_torch_greater_or_equal_than_1_10, is_torch_less_than_1_11
+from transformers.pytorch_utils import (
+    ALL_LAYERNORM_LAYERS,
+    is_torch_greater_or_equal_than_1_10,
+    is_torch_less_than_1_11,
+)
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 from transformers.trainer_callback import (
     CallbackHandler,
@@ -191,7 +210,12 @@ if is_sagemaker_mp_enabled():
 
     IS_SAGEMAKER_MP_POST_1_10 = version.parse(SMP_VERSION) >= version.parse("1.10")
 
-    from .trainer_pt_utils import smp_forward_backward, smp_forward_only, smp_gather, smp_nested_concat
+    from .trainer_pt_utils import (
+        smp_forward_backward,
+        smp_forward_only,
+        smp_gather,
+        smp_nested_concat,
+    )
 else:
     IS_SAGEMAKER_MP_POST_1_10 = False
 
@@ -211,11 +235,21 @@ SCALER_NAME = "scaler.pt"
 
 
 class OurTrainer(Trainer):
-
-    from transformers.trainer_pt_utils import _get_learning_rate, log_metrics, metrics_format, save_metrics, save_state
+    from transformers.trainer_pt_utils import (
+        _get_learning_rate,
+        log_metrics,
+        metrics_format,
+        save_metrics,
+        save_state,
+    )
 
     def _inner_training_loop(
-        self, batch_size=None, args=None, resume_from_checkpoint=None, trial=None, ignore_keys_for_eval=None
+        self,
+        batch_size=None,
+        args=None,
+        resume_from_checkpoint=None,
+        trial=None,
+        ignore_keys_for_eval=None,
     ):
         """
         We overload the original training loop to add linear probing and MeZO. Search key word "MeZO added"
@@ -237,6 +271,7 @@ class OurTrainer(Trainer):
             def _extract_features(model, *args, **kwargs):
                 """some magic for getting features pre last layer"""
                 features = {}
+
                 def __hook(model_, input_, output_):
                     features["features"] = input_[0].detach()
 
@@ -253,12 +288,15 @@ class OurTrainer(Trainer):
                     for k, v in inputs.items():
                         if isinstance(v, torch.Tensor):
                             inputs[k] = v.to(self.model.device)
-                        
+
                     feature = _extract_features(self.model, **inputs)
                     target = inputs["labels"]
 
                     # Shift the target (bc it's autoregressive LM) and add the corresponding part
-                    assert not self.args.train_as_classification and self.args.only_train_option
+                    assert (
+                        not self.args.train_as_classification
+                        and self.args.only_train_option
+                    )
                     feature, target = feature[:, :-1], target[:, 1:]
                     for _i, _len in enumerate(inputs["option_len"]):
                         features.append(feature[_i, -_len:])
@@ -274,19 +312,32 @@ class OurTrainer(Trainer):
             else:
                 raise NotImplementedError
             # Set early stopping
-            tol = 0.01 if self.args.lp_early_stopping else 1e-4 # 1e-4 is scipy default
+            tol = 0.01 if self.args.lp_early_stopping else 1e-4  # 1e-4 is scipy default
             max_iter = 1000 if self.args.lp_early_stopping else 5000
 
             logger.info("Fitting logistic regression...")
-            reg = LogisticRegressionCV(max_iter=max_iter, fit_intercept=use_bias, multi_class="multinomial", random_state=0, tol=tol, n_jobs=-1).fit(features, targets)
+            reg = LogisticRegressionCV(
+                max_iter=max_iter,
+                fit_intercept=use_bias,
+                multi_class="multinomial",
+                random_state=0,
+                tol=tol,
+                n_jobs=-1,
+            ).fit(features, targets)
             logger.info("Done")
 
             logger.info("Assigning weights to model")
             decoder = _get_token_prediction_layer(self.model)
-            coef_torch = torch.tensor(reg.coef_, device=decoder.weight.device, dtype=decoder.weight.dtype)
+            coef_torch = torch.tensor(
+                reg.coef_, device=decoder.weight.device, dtype=decoder.weight.dtype
+            )
             if use_bias:
-                bias_torch = torch.tensor(reg.intercept_, device=decoder.weight.device, dtype=decoder.weight.dtype)
-            if coef_torch.shape[0] == 1: # The regressor only detects two classes
+                bias_torch = torch.tensor(
+                    reg.intercept_,
+                    device=decoder.weight.device,
+                    dtype=decoder.weight.dtype,
+                )
+            if coef_torch.shape[0] == 1:  # The regressor only detects two classes
                 assert len(reg.classes_) == 2
                 coef_torch = torch.cat([-coef_torch / 2, coef_torch / 2], dim=0)
                 if use_bias:
@@ -303,12 +354,16 @@ class OurTrainer(Trainer):
         # number of training epochs: num_train_epochs
         # number of training steps per epoch: num_update_steps_per_epoch
         # total number of training steps to execute: max_steps
-        total_train_batch_size = args.train_batch_size * args.gradient_accumulation_steps * args.world_size
+        total_train_batch_size = (
+            args.train_batch_size * args.gradient_accumulation_steps * args.world_size
+        )
 
         len_dataloader = None
         if has_length(train_dataloader):
             len_dataloader = len(train_dataloader)
-            num_update_steps_per_epoch = len_dataloader // args.gradient_accumulation_steps
+            num_update_steps_per_epoch = (
+                len_dataloader // args.gradient_accumulation_steps
+            )
             num_update_steps_per_epoch = max(num_update_steps_per_epoch, 1)
             num_examples = self.num_examples(train_dataloader)
             if args.max_steps > 0:
@@ -320,10 +375,16 @@ class OurTrainer(Trainer):
                 # the best we can do.
                 num_train_samples = args.max_steps * total_train_batch_size
             else:
-                max_steps = math.ceil(args.num_train_epochs * num_update_steps_per_epoch)
+                max_steps = math.ceil(
+                    args.num_train_epochs * num_update_steps_per_epoch
+                )
                 num_train_epochs = math.ceil(args.num_train_epochs)
-                num_train_samples = self.num_examples(train_dataloader) * args.num_train_epochs
-        elif args.max_steps > 0:  # Rely on max_steps when dataloader does not have a working size
+                num_train_samples = (
+                    self.num_examples(train_dataloader) * args.num_train_epochs
+                )
+        elif (
+            args.max_steps > 0
+        ):  # Rely on max_steps when dataloader does not have a working size
             max_steps = args.max_steps
             # Setting a very large number of epochs so we go as many times as necessary over the iterator.
             num_train_epochs = sys.maxsize
@@ -355,7 +416,9 @@ class OurTrainer(Trainer):
         )
         if args.deepspeed:
             deepspeed_engine, optimizer, lr_scheduler = deepspeed_init(
-                self, num_training_steps=max_steps, resume_from_checkpoint=resume_from_checkpoint
+                self,
+                num_training_steps=max_steps,
+                resume_from_checkpoint=resume_from_checkpoint,
             )
             self.model = deepspeed_engine.module
             self.model_wrapped = deepspeed_engine
@@ -395,9 +458,15 @@ class OurTrainer(Trainer):
         logger.info("***** Running training *****")
         logger.info(f"  Num examples = {num_examples}")
         logger.info(f"  Num Epochs = {num_train_epochs}")
-        logger.info(f"  Instantaneous batch size per device = {args.per_device_train_batch_size}")
-        logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_train_batch_size}")
-        logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
+        logger.info(
+            f"  Instantaneous batch size per device = {args.per_device_train_batch_size}"
+        )
+        logger.info(
+            f"  Total train batch size (w. parallel, distributed & accumulation) = {total_train_batch_size}"
+        )
+        logger.info(
+            f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}"
+        )
         logger.info(f"  Total optimization steps = {max_steps}")
         logger.info(
             f"  Number of trainable parameters = {sum(p.numel() for p in model.parameters() if p.requires_grad)}"
@@ -413,17 +482,25 @@ class OurTrainer(Trainer):
         if resume_from_checkpoint is not None and os.path.isfile(
             os.path.join(resume_from_checkpoint, TRAINER_STATE_NAME)
         ):
-            self.state = TrainerState.load_from_json(os.path.join(resume_from_checkpoint, TRAINER_STATE_NAME))
+            self.state = TrainerState.load_from_json(
+                os.path.join(resume_from_checkpoint, TRAINER_STATE_NAME)
+            )
             epochs_trained = self.state.global_step // num_update_steps_per_epoch
             if not args.ignore_data_skip:
-                steps_trained_in_current_epoch = self.state.global_step % (num_update_steps_per_epoch)
+                steps_trained_in_current_epoch = self.state.global_step % (
+                    num_update_steps_per_epoch
+                )
                 steps_trained_in_current_epoch *= args.gradient_accumulation_steps
             else:
                 steps_trained_in_current_epoch = 0
 
-            logger.info("  Continuing training from checkpoint, will skip to saved global_step")
+            logger.info(
+                "  Continuing training from checkpoint, will skip to saved global_step"
+            )
             logger.info(f"  Continuing training from epoch {epochs_trained}")
-            logger.info(f"  Continuing training from global step {self.state.global_step}")
+            logger.info(
+                f"  Continuing training from global step {self.state.global_step}"
+            )
             if not args.ignore_data_skip:
                 logger.info(
                     f"  Will skip the first {epochs_trained} epochs then the first {steps_trained_in_current_epoch} "
@@ -431,8 +508,12 @@ class OurTrainer(Trainer):
                     "flag to your launch command, but you will resume the training on data already seen by your model."
                 )
                 if self.is_local_process_zero() and not args.disable_tqdm:
-                    steps_trained_progress_bar = tqdm(total=steps_trained_in_current_epoch)
-                    steps_trained_progress_bar.set_description("Skipping the first batches")
+                    steps_trained_progress_bar = tqdm(
+                        total=steps_trained_in_current_epoch
+                    )
+                    steps_trained_progress_bar.set_description(
+                        "Skipping the first batches"
+                    )
 
         # Update the references
         self.callback_handler.model = self.model
@@ -444,7 +525,11 @@ class OurTrainer(Trainer):
             # parameter to Train when using DDP.
             self.state.trial_name = self.hp_name(self._trial)
         if trial is not None:
-            assignments = trial.assignments if self.hp_search_backend == HPSearchBackend.SIGOPT else trial
+            assignments = (
+                trial.assignments
+                if self.hp_search_backend == HPSearchBackend.SIGOPT
+                else trial
+            )
             self.state.trial_params = hp_params(assignments)
         else:
             self.state.trial_params = None
@@ -462,7 +547,9 @@ class OurTrainer(Trainer):
         self._globalstep_last_logged = self.state.global_step
         model.zero_grad()
 
-        self.control = self.callback_handler.on_train_begin(args, self.state, self.control)
+        self.control = self.callback_handler.on_train_begin(
+            args, self.state, self.control
+        )
 
         # Skip the first epochs_trained epochs to get the random state of the dataloader at the right point.
         if not args.ignore_data_skip:
@@ -481,13 +568,19 @@ class OurTrainer(Trainer):
                     _ = list(train_dataloader.sampler)
 
         for epoch in range(epochs_trained, num_train_epochs):
-            if isinstance(train_dataloader, DataLoader) and isinstance(train_dataloader.sampler, DistributedSampler):
+            if isinstance(train_dataloader, DataLoader) and isinstance(
+                train_dataloader.sampler, DistributedSampler
+            ):
                 train_dataloader.sampler.set_epoch(epoch)
-            elif hasattr(train_dataloader, "dataset") and isinstance(train_dataloader.dataset, IterableDatasetShard):
+            elif hasattr(train_dataloader, "dataset") and isinstance(
+                train_dataloader.dataset, IterableDatasetShard
+            ):
                 train_dataloader.dataset.set_epoch(epoch)
 
             if is_torch_tpu_available():
-                parallel_loader = pl.ParallelLoader(train_dataloader, [args.device]).per_device_loader(args.device)
+                parallel_loader = pl.ParallelLoader(
+                    train_dataloader, [args.device]
+                ).per_device_loader(args.device)
                 epoch_iterator = parallel_loader
             else:
                 epoch_iterator = train_dataloader
@@ -501,14 +594,19 @@ class OurTrainer(Trainer):
                 if len_dataloader is not None
                 else args.max_steps * args.gradient_accumulation_steps
             )
-            self.control = self.callback_handler.on_epoch_begin(args, self.state, self.control)
+            self.control = self.callback_handler.on_epoch_begin(
+                args, self.state, self.control
+            )
 
-            if epoch == epochs_trained and resume_from_checkpoint is not None and steps_trained_in_current_epoch == 0:
+            if (
+                epoch == epochs_trained
+                and resume_from_checkpoint is not None
+                and steps_trained_in_current_epoch == 0
+            ):
                 self._load_rng_state(resume_from_checkpoint)
 
             step = -1
             for step, inputs in enumerate(epoch_iterator):
-
                 # Skip past any already trained steps if resuming training
                 if steps_trained_in_current_epoch > 0:
                     steps_trained_in_current_epoch -= 1
@@ -522,7 +620,9 @@ class OurTrainer(Trainer):
                     steps_trained_progress_bar = None
 
                 if step % args.gradient_accumulation_steps == 0:
-                    self.control = self.callback_handler.on_step_begin(args, self.state, self.control)
+                    self.control = self.callback_handler.on_step_begin(
+                        args, self.state, self.control
+                    )
 
                 # MeZO added: estimate gradient
                 if args.trainer == "zo":
@@ -545,7 +645,9 @@ class OurTrainer(Trainer):
                     and (torch.isnan(tr_loss_step) or torch.isinf(tr_loss_step))
                 ):
                     # if loss is nan or inf simply add the average of previous logged losses
-                    tr_loss += tr_loss / (1 + self.state.global_step - self._globalstep_last_logged)
+                    tr_loss += tr_loss / (
+                        1 + self.state.global_step - self._globalstep_last_logged
+                    )
                 else:
                     tr_loss += tr_loss_step
 
@@ -565,14 +667,22 @@ class OurTrainer(Trainer):
                         self.zo_update(model)
                     else:
                         # Gradient clipping
-                        if args.max_grad_norm is not None and args.max_grad_norm > 0 and not self.deepspeed:
+                        if (
+                            args.max_grad_norm is not None
+                            and args.max_grad_norm > 0
+                            and not self.deepspeed
+                        ):
                             # deepspeed does its own clipping
 
                             if self.do_grad_scaling:
                                 # Reduce gradients first for XLA
                                 if is_torch_tpu_available():
                                     gradients = xm._fetch_gradients(self.optimizer)
-                                    xm.all_reduce("sum", gradients, scale=1.0 / xm.xrt_world_size())
+                                    xm.all_reduce(
+                                        "sum",
+                                        gradients,
+                                        scale=1.0 / xm.xrt_world_size(),
+                                    )
                                 # AMP: gradients need unscaling
                                 self.scaler.unscale_(self.optimizer)
 
@@ -587,7 +697,9 @@ class OurTrainer(Trainer):
                             else:
                                 # Revert to normal clipping otherwise, handling Apex or full precision
                                 nn.utils.clip_grad_norm_(
-                                    amp.master_params(self.optimizer) if self.use_apex else model.parameters(),
+                                    amp.master_params(self.optimizer)
+                                    if self.use_apex
+                                    else model.parameters(),
                                     args.max_grad_norm,
                                 )
 
@@ -616,11 +728,17 @@ class OurTrainer(Trainer):
 
                     self.state.global_step += 1
                     self.state.epoch = epoch + (step + 1) / steps_in_epoch
-                    self.control = self.callback_handler.on_step_end(args, self.state, self.control)
+                    self.control = self.callback_handler.on_step_end(
+                        args, self.state, self.control
+                    )
 
-                    self._maybe_log_save_evaluate(tr_loss, model, trial, epoch, ignore_keys_for_eval)
+                    self._maybe_log_save_evaluate(
+                        tr_loss, model, trial, epoch, ignore_keys_for_eval
+                    )
                 else:
-                    self.control = self.callback_handler.on_substep_end(args, self.state, self.control)
+                    self.control = self.callback_handler.on_substep_end(
+                        args, self.state, self.control
+                    )
 
                 if self.control.should_epoch_stop or self.control.should_training_stop:
                     break
@@ -632,8 +750,12 @@ class OurTrainer(Trainer):
                 )
                 self.control.should_training_stop = True
 
-            self.control = self.callback_handler.on_epoch_end(args, self.state, self.control)
-            self._maybe_log_save_evaluate(tr_loss, model, trial, epoch, ignore_keys_for_eval)
+            self.control = self.callback_handler.on_epoch_end(
+                args, self.state, self.control
+            )
+            self._maybe_log_save_evaluate(
+                tr_loss, model, trial, epoch, ignore_keys_for_eval
+            )
 
             if DebugOption.TPU_METRICS_DEBUG in self.args.debug:
                 if is_torch_tpu_available():
@@ -651,7 +773,9 @@ class OurTrainer(Trainer):
             # Clean the state at the end of training
             delattr(self, "_past")
 
-        logger.info("\n\nTraining completed. Do not forget to share your model on huggingface.co/models =)\n\n")
+        logger.info(
+            "\n\nTraining completed. Do not forget to share your model on huggingface.co/models =)\n\n"
+        )
         if args.load_best_model_at_end and self.state.best_model_checkpoint is not None:
             # Wait for everyone to get here so we are sur the model has been saved by process 0.
             if is_torch_tpu_available():
@@ -667,7 +791,12 @@ class OurTrainer(Trainer):
         self._total_loss_scalar += tr_loss.item()
         train_loss = self._total_loss_scalar / self.state.global_step
 
-        metrics = speed_metrics("train", start_time, num_samples=num_train_samples, num_steps=self.state.max_steps)
+        metrics = speed_metrics(
+            "train",
+            start_time,
+            num_samples=num_train_samples,
+            num_steps=self.state.max_steps,
+        )
         self.store_flos()
         metrics["total_flos"] = self.state.total_flos
         metrics["train_loss"] = train_loss
@@ -679,46 +808,65 @@ class OurTrainer(Trainer):
         self.log(metrics)
 
         run_dir = self._get_output_dir(trial)
-        checkpoints_sorted = self._sorted_checkpoints(use_mtime=False, output_dir=run_dir)
+        checkpoints_sorted = self._sorted_checkpoints(
+            use_mtime=False, output_dir=run_dir
+        )
 
         # Delete the last checkpoint when save_total_limit=1 if it's different from the best checkpoint.
-        if self.state.best_model_checkpoint is not None and self.args.save_total_limit == 1:
+        if (
+            self.state.best_model_checkpoint is not None
+            and self.args.save_total_limit == 1
+        ):
             for checkpoint in checkpoints_sorted:
                 if checkpoint != self.state.best_model_checkpoint:
-                    logger.info(f"Deleting older checkpoint [{checkpoint}] due to args.save_total_limit")
+                    logger.info(
+                        f"Deleting older checkpoint [{checkpoint}] due to args.save_total_limit"
+                    )
                     shutil.rmtree(checkpoint)
 
-        self.control = self.callback_handler.on_train_end(args, self.state, self.control)
+        self.control = self.callback_handler.on_train_end(
+            args, self.state, self.control
+        )
 
         return TrainOutput(self.state.global_step, train_loss, metrics)
 
-
     ############## MeZO ##############
 
-
     def _mezo_should_skip_param(self, name, param):
-        if not getattr(self.args, "mezo_lora_only", False):
+        if not getattr(self.args, "mezo_lora_normal", False):
+            if getattr(self.args, "mezo_skip_position_embeddings", False) and (
+                "embed_positions" in name or "position_embeddings" in name
+            ):
+                return True
+            if getattr(self.args, "mezo_skip_1d", False) and param.data.ndim == 1:
+                return True
             return False
         if "embed" in name:
             return True
         return param.data.ndim != 2
 
-
     def zo_perturb_parameters(self, random_seed=None, scaling_factor=1):
         """
         Perturb the parameters with random vector z.
-        Input: 
+        Input:
         - random_seed: random seed for MeZO in-place perturbation (if it's None, we will use self.zo_random_seed)
         - scaling_factor: theta = theta + scaling_factor * z * eps
         """
 
         # Set the random seed to ensure that we sample the same z for perturbation/update
-        torch.manual_seed(random_seed if random_seed is not None else self.zo_random_seed)
-        
-        for name, param in self.named_parameters_to_optim:
-            z = torch.normal(mean=0, std=1, size=param.data.size(), device=param.data.device, dtype=param.data.dtype)
-            param.data = param.data + scaling_factor * z * self.args.zo_eps
+        torch.manual_seed(
+            random_seed if random_seed is not None else self.zo_random_seed
+        )
 
+        for name, param in self.named_parameters_to_optim:
+            z = torch.normal(
+                mean=0,
+                std=1,
+                size=param.data.size(),
+                device=param.data.device,
+                dtype=param.data.dtype,
+            )
+            param.data = param.data + scaling_factor * z * self.args.zo_eps
 
     def zo_forward(self, model, inputs):
         """
@@ -738,29 +886,47 @@ class OurTrainer(Trainer):
                 loss = loss.mean()  # mean() to average on multi-gpu parallel training
         return loss.detach()
 
-
     def zo_forward_nondiff(self, model, inputs):
         """
         Get (no gradient) non-diffiable loss from the model.
         """
         model.eval()
-        assert self.args.task_name == "SQuAD", "Non differentiable objective only supports SQuAD for now."
+        assert self.args.task_name == "SQuAD", (
+            "Non differentiable objective only supports SQuAD for now."
+        )
 
         with torch.inference_mode():
             inputs = self._prepare_inputs(inputs)
             args = self.args
             outputs = self.model.generate(
-                inputs["input_ids"], do_sample=args.sampling, temperature=args.temperature, 
-                num_beams=args.num_beams, top_p=args.top_p, top_k=args.top_k, max_new_tokens=min(args.max_new_tokens, args.max_length - inputs["input_ids"].size(1)), 
-                num_return_sequences=1, eos_token_id=[self.tokenizer.encode(args.eos_token, add_special_tokens=False)[-1], self.tokenizer.eos_token_id],
+                inputs["input_ids"],
+                do_sample=args.sampling,
+                temperature=args.temperature,
+                num_beams=args.num_beams,
+                top_p=args.top_p,
+                top_k=args.top_k,
+                max_new_tokens=min(
+                    args.max_new_tokens, args.max_length - inputs["input_ids"].size(1)
+                ),
+                num_return_sequences=1,
+                eos_token_id=[
+                    self.tokenizer.encode(args.eos_token, add_special_tokens=False)[-1],
+                    self.tokenizer.eos_token_id,
+                ],
             )
             output_text = []
             for i in range(len(outputs)):
-                output_text.append(self.tokenizer.decode(outputs[i][inputs["input_ids"].size(1):], skip_special_tokens=True).strip())
-            f1s = [f1(output_text[i], inputs['gold'][i]) for i in range(len(output_text))]
-        
-        return -torch.tensor(np.mean(f1s), dtype=torch.float32)
+                output_text.append(
+                    self.tokenizer.decode(
+                        outputs[i][inputs["input_ids"].size(1) :],
+                        skip_special_tokens=True,
+                    ).strip()
+                )
+            f1s = [
+                f1(output_text[i], inputs["gold"][i]) for i in range(len(output_text))
+            ]
 
+        return -torch.tensor(np.mean(f1s), dtype=torch.float32)
 
     def zo_step(self, model, inputs):
         """
@@ -768,7 +934,7 @@ class OurTrainer(Trainer):
         """
         args = self.args
 
-        # What parameters to optimize 
+        # What parameters to optimize
         self.named_parameters_to_optim = []
         for name, param in model.named_parameters():
             if param.requires_grad and not self._mezo_should_skip_param(name, param):
@@ -792,9 +958,8 @@ class OurTrainer(Trainer):
 
         # Reset model back to its parameters at start of step
         self.zo_perturb_parameters(scaling_factor=1)
-        
-        return loss1
 
+        return loss1
 
     def zo_update(self, model):
         """
@@ -803,21 +968,33 @@ class OurTrainer(Trainer):
         args = self.args
 
         # Reset the random seed for sampling zs
-        torch.manual_seed(self.zo_random_seed)     
+        torch.manual_seed(self.zo_random_seed)
 
         for name, param in self.named_parameters_to_optim:
             # Resample z
-            z = torch.normal(mean=0, std=1, size=param.data.size(), device=param.data.device, dtype=param.data.dtype)
-            if "bias" not in name and "layer_norm" not in name and "layernorm" not in name:
-                param.data = param.data - self._get_learning_rate() * (self.projected_grad * z + args.weight_decay * param.data)
+            z = torch.normal(
+                mean=0,
+                std=1,
+                size=param.data.size(),
+                device=param.data.device,
+                dtype=param.data.dtype,
+            )
+            if (
+                "bias" not in name
+                and "layer_norm" not in name
+                and "layernorm" not in name
+            ):
+                param.data = param.data - self._get_learning_rate() * (
+                    self.projected_grad * z + args.weight_decay * param.data
+                )
             else:
-                param.data = param.data - self._get_learning_rate() * (self.projected_grad * z)
+                param.data = param.data - self._get_learning_rate() * (
+                    self.projected_grad * z
+                )
 
         self.lr_scheduler.step()
 
-
     ############## Misc overload functions ##############
-
 
     def _set_signature_columns_if_needed(self):
         """
@@ -828,13 +1005,16 @@ class OurTrainer(Trainer):
             signature = inspect.signature(self.model.forward)
             self._signature_columns = list(signature.parameters.keys())
             # Labels may be named label or label_ids, the default data collator handles that.
-            self._signature_columns += list(set(["label", "label_ids"] + self.label_names))
+            self._signature_columns += list(
+                set(["label", "label_ids"] + self.label_names)
+            )
             self._signature_columns += ["gold"]
 
-    
-    def save_model(self, output_dir: Optional[str] = None, _internal_call: bool = False):
+    def save_model(
+        self, output_dir: Optional[str] = None, _internal_call: bool = False
+    ):
         """
-        We overload this function to fix an FSDP saving bug (before fix, it will likely cause OOM) 
+        We overload this function to fix an FSDP saving bug (before fix, it will likely cause OOM)
         """
 
         if output_dir is None:
@@ -856,11 +1036,20 @@ class OurTrainer(Trainer):
             or ShardedDDPOption.ZERO_DP_3 in self.args.sharded_ddp
             or self.fsdp is not None
         ):
-            from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, StateDictType, FullStateDictConfig
-            full_state_dict_config = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+            from torch.distributed.fsdp import (
+                FullyShardedDataParallel as FSDP,
+                StateDictType,
+                FullStateDictConfig,
+            )
+
+            full_state_dict_config = FullStateDictConfig(
+                offload_to_cpu=True, rank0_only=True
+            )
 
             # Fix the FSDP loading bug
-            with FSDP.state_dict_type(self.model, StateDictType.FULL_STATE_DICT, full_state_dict_config):
+            with FSDP.state_dict_type(
+                self.model, StateDictType.FULL_STATE_DICT, full_state_dict_config
+            ):
                 state_dict = self.model.state_dict()
             # state_dict = self.model.state_dict()
 

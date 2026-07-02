@@ -46,13 +46,57 @@ MODEL=facebook/opt-13b TASK=SST2 MODE=ft LR=1e-7 EPS=1e-3 bash mezo.sh
 
 # LOZO (full-parameter)
 MODEL=facebook/opt-13b TASK=SST2 MODE=ft LR=1e-7 EPS=1e-3 RANK=2 STEP_INTERVAL=50 bash lozo.sh
+
+# LOZO fast baseline mode
+MODEL=facebook/opt-13b TASK=SST2 MODE=ft LR=1e-7 EPS=1e-3 RANK=2 STEP_INTERVAL=50 LOZO_FAST_MODE=1 bash lozo.sh
 ```
 
 Note that `icl.sh` and `mezo.sh` automatically support multi-GPU usage. For fine-tuning, use `finetune_fsdp.sh` for multi-GPU training and specific `NUM_GPU`. Evaluation results (json format) and checkpoints (HuggingFace format) will be saved in `result` folder.
+
+## LOZO fast baseline mode
+
+Use this mode when measuring the optimized LOZO baseline runtime:
+
+```bash
+LOZO_FAST_MODE=1 bash lozo.sh
+```
+
+`LOZO_FAST_MODE=1` expands to:
+
+```bash
+--lozo_perturbation_backend lora --lozo_update_backend lazy_lora
+```
+
+The mode keeps the same low-rank LOZO probe direction but avoids ordinary
+per-step dense writes:
+
+| Mode | Perturbation | Update | Ordinary dense write / step |
+| --- | --- | --- | ---: |
+| default | in-place dense | in-place dense | 4 |
+| `--lozo_perturbation_backend lora --lozo_update_backend dense` | LoRA branch | in-place dense | 1 |
+| `LOZO_FAST_MODE=1` | LoRA branch | lazy LoRA accumulation | 0 |
+
+The last row still folds the accumulated lazy LoRA update into the base weight
+when the cached `V` direction refreshes every `--step_interval` steps. Therefore
+the long-run write cost is one fold per `step_interval`, not zero writes over
+the whole run.
+
+For direct CLI usage without `lozo.sh`, pass the two backend arguments to
+`run_lozo.py` explicitly:
+
+```bash
+python run_lozo.py {ARGUMENTS} \
+  --trainer LOZO \
+  --lozo_perturbation_backend lora \
+  --lozo_update_backend lazy_lora
+```
+
+Use `--lozo_perturbation_backend lora --lozo_update_backend dense` only for the
+ablation that measures LoRA-form probing while keeping the original dense
+update.
 
 Our recommended hyperparameter search range for OPT-13b (should also work for other sizes/models) are as follows,
 
 | LOZO methods  | LR           | EPS | rank | $\nu$ |  
 | ------------- | ------------ | --- | ---- | ----- |
 | Full parameter  | 1e-6/1e-7 | 1e-3 | 1/2  | 50/100| 
-

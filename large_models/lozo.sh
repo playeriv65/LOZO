@@ -12,10 +12,14 @@ EVAL_STEPS=${EVAL_STEPS:-4000}
 
 MODE=${MODE:-ft}
 EXTRA_ARGS=""
+LOZO_FAST_MODE=${LOZO_FAST_MODE:-0}
 if [ "$MODE" == "prefix" ]; then
     EXTRA_ARGS="--prefix_tuning --num_prefix 5 --no_reparam --prefix_init_by_real_act"
 elif [ "$MODE" == "lora" ]; then
     EXTRA_ARGS="--lora"
+fi
+if [ "$LOZO_FAST_MODE" == "1" ]; then
+    EXTRA_ARGS="$EXTRA_ARGS --lozo_perturbation_backend lora --lozo_update_backend lazy_lora"
 fi
 
 LR=1e-7
@@ -47,7 +51,11 @@ case $TASK in
         ;;
 esac
 
-TAG=$Tainer-$MODE-$STEPS-$BS-$LR-$EPS-$SEED-$STEP_INTERVAL-$RANK
+FAST_TAG=""
+if [ "$LOZO_FAST_MODE" == "1" ]; then
+    FAST_TAG="-fastlora"
+fi
+TAG=$Tainer-$MODE$FAST_TAG-$STEPS-$BS-$LR-$EPS-$SEED-$STEP_INTERVAL-$RANK
 
 
 echo $TAG
@@ -58,6 +66,7 @@ echo "EPS: $EPS"
 echo "SEED: $SEED"
 echo "TRAIN/EVAL STEPS: $STEPS/$EVAL_STEPS"
 echo "MODE: $MODE"
+echo "LOZO FAST MODE: $LOZO_FAST_MODE"
 echo "Extra args: $EXTRA_ARGS $TASK_ARGS"
 echo "RANK: $RANK"
 echo "STEP INTERVAL: $STEP_INTERVAL"
@@ -77,7 +86,6 @@ python run_lozo.py \
     $EXTRA_ARGS \
     $TASK_ARGS \
     "$@" 
-
 
 
 
